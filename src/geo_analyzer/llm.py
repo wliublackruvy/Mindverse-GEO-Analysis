@@ -7,11 +7,12 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, replace
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import requests
 
-from .models import DiagnosisRequest, Industry
+from .errors import SensitiveContentError
+from .models import DiagnosisRequest, Industry, SENSITIVE_KEYWORDS, SENSITIVE_BLOCK_MESSAGE
 
 
 class SecretsManager:
@@ -20,6 +21,7 @@ class SecretsManager:
     def __init__(self) -> None:
         self._records: Dict[str, Dict[str, Any]] = {}
         self._lock = threading.Lock()
+        self._alerts: List[Dict[str, Any]] = []
 
     def register_key(
         self,
@@ -48,6 +50,10 @@ class SecretsManager:
                 raise KeyError(f"Secret '{name}' not found")
             return self._records[name]["api_key"]
 
+    def revoke_key(self, name: str) -> None:
+        with self._lock:
+            self._records.pop(name, None)
+
     def record_usage(self, name: str, used_tokens: int) -> None:
         if used_tokens <= 0:
             return
@@ -59,12 +65,27 @@ class SecretsManager:
             quota = record.get("quota_limit") or 0
             if quota and not record["alerted"] and record["usage"] >= quota * 0.8:
                 record["alerted"] = True
+                self._alerts.append(
+                    {
+                        "name": name,
+                        "message": "API Key usage exceeded 80% of quota",
+                        "usage": record["usage"],
+                        "quota_limit": quota,
+                        "expires_at": record.get("expires_at"),
+                    }
+                )
 
     def snapshot(self, name: str) -> Dict[str, Any]:
         with self._lock:
             if name not in self._records:
                 raise KeyError(f"Secret '{name}' not found")
             return dict(self._records[name])
+
+    def consume_alerts(self) -> List[Dict[str, Any]]:
+        with self._lock:
+            alerts = list(self._alerts)
+            self._alerts.clear()
+        return alerts
 
 
 class RateLimitError(RuntimeError):
@@ -229,9 +250,105 @@ class LLMCall:
 
 
 @dataclass
+class RawTraceEntry:
+    platform: str
+    prompt_type: str
+    content: List[str]
+    mentions: List[str]
+    sentiment_score: float
+    latency_ms: float
+    recorded_at: float
+
+
+@dataclass
+class SummaryTraceEntry:
+    payload: Dict[str, Any]
+    recorded_at: float
+
+
+class LLMTraceStore:
+    """In-memory trace store with retention policy (PRD F-06.4)."""
+
+    def __init__(
+        self,
+        *,
+        raw_ttl: int = 30 * 24 * 3600,
+        summary_ttl: int = 365 * 24 * 3600,
+        time_fn: Optional[Callable[[], float]] = None,
+    ) -> None:
+        self.raw_ttl = raw_ttl
+        self.summary_ttl = summary_ttl
+        self._time = time_fn or time.time
+        self._raw: Dict[str, List[RawTraceEntry]] = {}
+        self._summary: Dict[str, SummaryTraceEntry] = {}
+
+    def record_raw(self, call: LLMCall) -> None:
+        now = self._time()
+        entry = RawTraceEntry(
+            platform=call.platform,
+            prompt_type=call.prompt_type,
+            content=[call.content],
+            mentions=list(call.mentions),
+            sentiment_score=call.sentiment,
+            latency_ms=call.latency_ms,
+            recorded_at=now,
+        )
+        self._raw.setdefault(call.task_id, []).append(entry)
+        self._cleanup()
+
+    def record_summary(self, task_id: str, payload: Dict[str, Any]) -> None:
+        now = self._time()
+        self._summary[task_id] = SummaryTraceEntry(
+            payload=dict(payload),
+            recorded_at=now,
+        )
+        self._cleanup()
+
+    def get_trace(self, task_id: str) -> Dict[str, Any]:
+        self._cleanup()
+        raw_entries = [
+            {
+                "platform": entry.platform,
+                "prompt_type": entry.prompt_type,
+                "content": entry.content,
+                "mentions": entry.mentions,
+                "sentiment": {"score": entry.sentiment_score},
+                "latency_ms": round(entry.latency_ms, 2),
+                "recorded_at": entry.recorded_at,
+            }
+            for entry in self._raw.get(task_id, [])
+        ]
+        summary = None
+        existing_summary = self._summary.get(task_id)
+        if existing_summary:
+            summary = {
+                **existing_summary.payload,
+                "recorded_at": existing_summary.recorded_at,
+            }
+        return {"task_id": task_id, "raw": raw_entries, "summary": summary}
+
+    def _cleanup(self) -> None:
+        now = self._time()
+        for task_id, entries in list(self._raw.items()):
+            filtered = [
+                entry
+                for entry in entries
+                if now - entry.recorded_at <= self.raw_ttl
+            ]
+            if filtered:
+                self._raw[task_id] = filtered
+            else:
+                self._raw.pop(task_id, None)
+        for task_id, summary in list(self._summary.items()):
+            if now - summary.recorded_at > self.summary_ttl:
+                self._summary.pop(task_id, None)
+
+
+@dataclass
 class LLMObservation:
     iteration: int
     platform: str
+    platform_key: str
     recommended: bool
     competitor: Optional[str]
     sentiment: float
@@ -249,10 +366,11 @@ class LLMRunResult:
 
 
 class LLMOrchestrator:
-    """Coordinates real Doubao/DeepSeek calls + fallback logic (PRD F-06, E-01)."""
+    """Coordinates real Doubao/DeepSeek calls + fallback logic (PRD F-06, E-01/E-02)."""
 
-    _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}")
-    _PHONE_RE = re.compile(r"\\b\\d{3,4}-?\\d{4,}\\b")
+    _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+    _PHONE_RE = re.compile(r"\b\d{3,4}-?\d{4,}\b")
+    _ADDRESS_RE = re.compile(r"[\w\d]{0,10}(?:路|街|道|号)\w*", re.UNICODE)
     _MENTION_RE = re.compile(r"[A-Z][A-Za-z0-9\-]+")
     _PLATFORM_LABELS = {"doubao": "豆包", "deepseek": "DeepSeek"}
 
@@ -267,6 +385,7 @@ class LLMOrchestrator:
         positive_keywords: Optional[Dict[str, float]] = None,
         negative_keywords: Optional[Dict[str, float]] = None,
         negative_tags: Optional[List[str]] = None,
+        trace_store: Optional[LLMTraceStore] = None,
     ) -> None:
         self.secrets = secrets or SecretsManager()
         self.cache_ttl = cache_ttl
@@ -274,9 +393,11 @@ class LLMOrchestrator:
         self.positive_keywords = positive_keywords or {}
         self.negative_keywords = negative_keywords or {}
         self.negative_tags = negative_tags or ["体验顺畅"]
+        self.trace_store = trace_store or LLMTraceStore()
         self._cache: Dict[str, Tuple[float, LLMCall]] = {}
         self._task_queue: List[str] = []
         self._llm_logs: List[Dict[str, Any]] = []
+        self._parser_version = "geo-llm-parser-v1"
         self._token_buckets = {
             "doubao": TokenBucket(),
             "deepseek": TokenBucket(),
@@ -321,28 +442,31 @@ class LLMOrchestrator:
 
         competitors = self._inline_competitors(request)
         observations: List[LLMObservation] = []
-        for iteration in range(iterations):
-            provider = self._PLATFORM_LABELS["doubao" if iteration % 2 == 0 else "deepseek"]
-            recommended = iteration < recommended_runs
-            competitor = None
-            if not recommended and competitors:
-                competitor = competitors[iteration % len(competitors)]
-            sentiment = -0.3 if iteration < negative_runs else 0.2
-            tag = self.negative_tags[iteration % len(self.negative_tags)]
-            observations.append(
-                LLMObservation(
-                    iteration=iteration + 1,
-                    platform=provider,
-                    recommended=recommended,
-                    competitor=competitor,
-                    sentiment=sentiment,
-                    tag=tag,
+        platforms = ["doubao", "deepseek"]
+        for platform_key in platforms:
+            platform_label = self._PLATFORM_LABELS[platform_key]
+            for iteration in range(iterations):
+                recommended = iteration < recommended_runs
+                competitor = None
+                if not recommended and competitors:
+                    competitor = competitors[(iteration + platforms.index(platform_key)) % len(competitors)]
+                sentiment = -0.3 if iteration < negative_runs else 0.2
+                tag = self.negative_tags[iteration % len(self.negative_tags)]
+                observations.append(
+                    LLMObservation(
+                        iteration=len(observations) + 1,
+                        platform=platform_label,
+                        platform_key=platform_key,
+                        recommended=recommended,
+                        competitor=competitor,
+                        sentiment=sentiment,
+                        tag=tag,
+                    )
                 )
-            )
         return LLMRunResult(
             task_id=str(uuid.uuid4()),
             observations=observations,
-            coverage={"doubao": True, "deepseek": True},
+            coverage={"doubao": False, "deepseek": False},
             cache_note=None,
             degraded=False,
         )
@@ -358,55 +482,57 @@ class LLMOrchestrator:
             return self._simulate_offline(request, iterations)
 
         observations: List[LLMObservation] = []
-        round_robin = list(active_clients.keys())
-
         for iteration in range(iterations):
-            if not active_clients:
-                break
-            platform_key = round_robin[iteration % len(round_robin)]
-            client = active_clients[platform_key]
-            platform_label = self._PLATFORM_LABELS.get(platform_key, platform_key)
-            iteration_calls: Dict[str, LLMCall] = {}
-            prompts = (
-                ("discovery", self._build_discovery_prompt(request)),
-                ("evaluation", self._build_evaluation_prompt(request)),
-            )
-            for prompt_type, prompt in prompts:
-                cache_key = self._cache_key(platform_key, prompt)
-                try:
-                    call = self._invoke_client(
-                        client=client,
-                        task_id=task_id,
+            for platform_key in list(active_clients.keys()):
+                client = active_clients.get(platform_key)
+                if not client:
+                    continue
+                platform_label = self._PLATFORM_LABELS.get(platform_key, platform_key)
+                iteration_calls: Dict[str, LLMCall] = {}
+                prompts = (
+                    ("discovery", self._build_discovery_prompt(request)),
+                    ("evaluation", self._build_evaluation_prompt(request)),
+                )
+                for prompt_type, prompt in prompts:
+                    cache_key = self._cache_key(platform_key, prompt)
+                    try:
+                        call = self._invoke_client(
+                            client=client,
+                            task_id=task_id,
+                            platform=platform_label,
+                            platform_key=platform_key,
+                            prompt_type=prompt_type,
+                            prompt=prompt,
+                            request=request,
+                        )
+                        strike_counts[platform_key] = 0
+                        coverage[platform_key] = True
+                        iteration_calls[prompt_type] = call
+                        self._write_cache(cache_key, call)
+                    except SensitiveContentError:
+                        raise
+                    except LLMClientError:
+                        strike_counts[platform_key] += 1
+                        cached_call = self._read_cache(cache_key)
+                        if cached_call:
+                            cache_note = "(来自缓存，已进入实时重试队列)"
+                            iteration_calls[prompt_type] = replace(cached_call, cached=True)
+                        if strike_counts[platform_key] >= 3:
+                            active_clients.pop(platform_key, None)
+                            break
+                if not iteration_calls:
+                    continue
+                observations.append(
+                    self._calls_to_observation(
+                        iteration=len(observations) + 1,
                         platform=platform_label,
                         platform_key=platform_key,
-                        prompt_type=prompt_type,
-                        prompt=prompt,
+                        calls=iteration_calls,
                         request=request,
                     )
-                    strike_counts[platform_key] = 0
-                    coverage[platform_key] = True
-                    iteration_calls[prompt_type] = call
-                    self._write_cache(cache_key, call)
-                except LLMClientError:
-                    strike_counts[platform_key] += 1
-                    cached_call = self._read_cache(cache_key)
-                    if cached_call:
-                        cache_note = "(来自缓存，已进入实时重试队列)"
-                        iteration_calls[prompt_type] = replace(cached_call, cached=True)
-                    if strike_counts[platform_key] >= 3:
-                        active_clients.pop(platform_key, None)
-                        round_robin = list(active_clients.keys()) or [platform_key]
-                        break
-            if not iteration_calls:
-                continue
-            observations.append(
-                self._calls_to_observation(
-                    iteration=iteration + 1,
-                    platform=platform_label,
-                    calls=iteration_calls,
-                    request=request,
                 )
-            )
+            if not active_clients:
+                break
 
         degraded = not observations
         if degraded:
@@ -437,16 +563,28 @@ class LLMOrchestrator:
         request: DiagnosisRequest,
     ) -> LLMCall:
         start = time.perf_counter()
-        try:
-            response = client.create_chat_completion(messages=[{"role": "user", "content": prompt}])
-        except requests.RequestException as exc:  # pragma: no cover
-            raise LLMClientError(str(exc)) from exc
+        attempts = 3
+        last_error: Optional[Exception] = None
+        for attempt in range(1, attempts + 1):
+            try:
+                response = client.create_chat_completion(messages=[{"role": "user", "content": prompt}])
+                break
+            except (requests.RequestException, RateLimitError, LLMClientError) as exc:  # pragma: no cover
+                last_error = exc
+                if attempt < attempts:
+                    time.sleep(2 ** attempt)
+                    continue
+                raise LLMClientError(str(exc)) from exc
+        else:  # pragma: no cover
+            raise LLMClientError(str(last_error))
         latency_ms = (time.perf_counter() - start) * 1000
         choices = response.get("choices")
         if not choices:
             raise LLMClientError("No choices returned")
         message = choices[0].get("message", {})
         content = message.get("content", "")
+        if self._contains_sensitive_output(content):
+            raise SensitiveContentError(SENSITIVE_BLOCK_MESSAGE)
         finish_reason = choices[0].get("finish_reason", "")
         mentions = self._extract_mentions(content)
         sentiment = self._score_sentiment(content)
@@ -463,14 +601,19 @@ class LLMOrchestrator:
             cached=False,
             latency_ms=latency_ms,
         )
+        self.trace_store.record_raw(call)
         self._llm_logs.append(
             {
                 "task_id": task_id,
                 "platform": platform_key,
                 "prompt_type": prompt_type,
+                 "content": [content],
+                 "mentions": mentions,
+                 "sentiment": {"score": sentiment},
                 "prompt_hash": prompt_hash,
                 "response_json": response,
                 "latency_ms": round(latency_ms, 2),
+                "parser_version": self._parser_version,
             }
         )
         return call
@@ -480,6 +623,7 @@ class LLMOrchestrator:
         *,
         iteration: int,
         platform: str,
+        platform_key: str,
         calls: Dict[str, LLMCall],
         request: DiagnosisRequest,
     ) -> LLMObservation:
@@ -500,6 +644,7 @@ class LLMOrchestrator:
         return LLMObservation(
             iteration=iteration,
             platform=platform,
+            platform_key=platform_key,
             recommended=recommended,
             competitor=competitor,
             sentiment=sentiment,
@@ -519,6 +664,7 @@ class LLMOrchestrator:
     def _sanitize_input(self, text: str) -> str:
         sanitized = self._EMAIL_RE.sub("[REDACTED_EMAIL]", text)
         sanitized = self._PHONE_RE.sub("[REDACTED_PHONE]", sanitized)
+        sanitized = self._ADDRESS_RE.sub("[REDACTED_ADDRESS]", sanitized)
         return sanitized
 
     def _cache_key(self, platform: str, prompt: str) -> str:
@@ -581,6 +727,10 @@ class LLMOrchestrator:
             for candidate in self.industry_competitors.get(request.industry, []):
                 deduped.setdefault(candidate, None)
         return list(deduped.keys())
+
+    def _contains_sensitive_output(self, content: str) -> bool:
+        normalized = content.lower()
+        return any(keyword.lower() in normalized for keyword in SENSITIVE_KEYWORDS)
 
     def _bootstrap_secrets_from_env(self) -> None:
         mapping = {

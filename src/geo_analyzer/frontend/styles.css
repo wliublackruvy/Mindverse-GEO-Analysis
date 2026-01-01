@@ -26,7 +26,8 @@ body {
 .form-section,
 .progress-section,
 .logs-section,
-.result-section {
+.result-section,
+.trace-section {
   background: rgba(17, 34, 68, 0.8);
   border-radius: 16px;
   padding: 24px;
@@ -71,9 +72,21 @@ button:disabled {
   cursor: not-allowed;
 }
 
+.secondary-btn {
+  margin-top: 12px;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.3);
+}
+
 .status {
   min-height: 20px;
   color: #83e2ff;
+}
+
+.tip {
+  margin-top: 8px;
+  color: #6ee7c8;
+  font-size: 0.85rem;
 }
 
 .benchmark-copy {
@@ -156,4 +169,45 @@ button:disabled {
 
 .hidden {
   display: none;
+}
+
+.trace-window {
+  background: rgba(0, 0, 0, 0.4);
+  border-radius: 12px;
+  padding: 16px;
+  font-family: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+  font-size: 0.85rem;
+  max-height: 320px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+}
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 99;
+}
+
+.modal-content {
+  background: #0f1a33;
+  padding: 28px;
+  border-radius: 18px;
+  width: min(420px, 90vw);
+  box-shadow: 0 25px 60px rgba(0, 0, 0, 0.5);
+  text-align: center;
+}
+
+.modal-content h3 {
+  margin-top: 0;
+}
+
+.modal-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 16px;
 }

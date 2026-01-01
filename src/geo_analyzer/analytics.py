@@ -21,7 +21,13 @@ class AnalyticsTracker:
         self._events: List[AnalyticsEvent] = []
 
     def track(self, name: str, payload: Dict[str, Any] | None = None) -> None:
+        # PRD: Analytics – record funnel, industry, and share telemetry.
         self._events.append(AnalyticsEvent(name=name, payload=payload or {}))
+
+    def flush(self) -> List[AnalyticsEvent]:
+        events = list(self._events)
+        self._events.clear()
+        return events
 
     @property
     def events(self) -> List[AnalyticsEvent]:

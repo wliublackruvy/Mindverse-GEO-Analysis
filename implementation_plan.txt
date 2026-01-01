@@ -1,19 +1,31 @@
-Scope (PRD 3. Detailed Functional Requirements):
-- In: F-06 Doubao & DeepSeek real API integration within backend engine; E-01 API timeout/3-strike fallback industry estimation.
-- Out: UI messaging, analytics, offline cache UI prompts not involving backend LLM orchestrator.
+Current Verification Focus (per PRD §3 & §4):
+1. [F-01] Reconfirm frontend benchmark copy requirement (“该行业平均 AI 推荐率为 25%”) and ensure industry selector displays this exact static wording regardless of industry.
+2. [E-02] Expand sensitive keyword detection to cover all user-provided fields (公司全称/产品名称/描述) so any input hit triggers the mandated拦截提示。
 
-Acceptance Criteria:
-1. F-06 §3: Secrets Manager for API keys; POST /v1/chat/completions support for Doubao (doubao-pro) and DeepSeek (deepseek-chat) with schema {platform,prompt_type,content[],mentions[],sentiment.score}, rate-limit via TokenBucket (60 RPM), log responses per task, coverage metrics, fallback to cache when available.
-2. E-01 §4: If a platform hits 3 consecutive failures, halt calls for that platform, mark coverage accordingly, switch engine outputs to industry estimation data without surfacing errors.
+Scope (PRD §1.3 & §3):
+- In Scope: F-01~F-05 user journey (form fields, progress UX, conversion logic, advice output), F-06 realtime engine + cache, E-01/E-02 exception flows, Section 5 analytics telemetry.
+- Out of Scope: Deployment packaging, PDF export pipeline, external marketing automation beyond CTA triggers.
+
+Acceptance Criteria (by PRD IDs):
+- F-01: Form fields (company/product/description ≥10 chars/industry/email) are required; industry selection instantly displays "该行业平均 AI 推荐率为 25%" style copy; submission banner conveys real-time Doubao & DeepSeek sourcing.
+- F-02: Each platform executes 20 simulations per diagnosis; SOV computed as 推荐次数/20*100%; Discovery/Evaluation prompts match PRD; Doubao (doubao-pro) uses temp 0.4/top_p 0.8; DeepSeek (deepseek-chat) enforces max_tokens 512 & finish_reason validation; token bucket (60 RPM) + 3 retries with 2^n backoff; llm_logs capture task_id/platform/prompt_type/prompt_hash/response_json/latency_ms; competitor extraction present.
+- F-03: Console log strings stream pseudo system/analysis lines; charts refresh every 5 runs via snapshots; UI waits show progress.
+- F-04: Conversion card matches table logic (modes, thresholds, copies, CTA) and surfaces competitor in growth mode.
+- F-05: Always returns 3 tactical advices exactly as specified for low SOV, high negative tags, and detected competitors with placeholders filled from runtime metrics.
+- F-06.1~6: Secrets Manager isolates keys, tracks quota/expires; per-task concurrency queue + coverage flags; sanitized prompts remove email/phone/address; unified schema exposes {platform,prompt_type,content[],mentions[],sentiment.score}; raw logs retained, cache hits labeled “(来自缓存，已进入实时重试队列)”; degraded runs fall back to estimation; UI banner communicates data source; offline cache/resend note captured in metrics/logs.
+- E-01: After 3 consecutive API failures per platform, silently degrade to industry estimation with grey note "*Based on Industry Estimation*" while keeping other platform alive.
+- E-02: Sensitive keywords in input/output halt generation with prescribed popup copy linking到加微信方案.
+- Analytics §5: Track funnel (visit, submit, wait, CTA click), industry distribution, and report download/share events.
 
 Constraints:
-- LLM clients must capture usage quota & expiry metadata (F-06.1).
-- Each task_id orchestrates Doubao+DeepSeek concurrently with task_queue (F-06.2).
-- Responses must be parsed to unified schema and stored with algorithm version (F-06.3-4).
-- Must support 24h cache fallback note tagging (F-06.6) and UI grey note.
+- Add inline comments tagged with “# PRD: <ID>” for implemented logic.
+- Prefer minimal diff, keep async-safe structures; no reliance on external network/migrations.
 
-Implementation Plan (aligned to PRD sections):
-1. (F-06.1/2) Implement src/geo_analyzer/llm.py with SecretsManager, TokenBucket, DoubaoClient, DeepSeekClient wrapping POST /v1/chat/completions, enforce rate limiting, retries, metadata capture, cache hooks.
-2. (F-06.3/4) Extend models.SimulationMetrics with coverage and cache_note to track per-platform success + cache usage; ensure schema accommodates mentions/sentiment fields.
-3. (F-06.2/6 & E-01) Update engine.py: integrate LLMOrchestrator to coordinate Doubao/DeepSeek calls per task_id, stream into llm_logs, and implement 3-strike fallback (stop platform, use cache/industry estimation, mark coverage & cache_note) without user-facing errors.
-4. (F-06/E-01) Add tests/test_f06_llm.py covering SecretsManager loading, TokenBucket throttling, Doubao/DeepSeek request building, fallback triggers, and cache note propagation with PRD tag.
+Implementation Plan (mapped to PRD sections):
+1. [F-01/F-06.5] Update frontend form/app.js/index.html to show benchmark copy immediately, append assurance banner post-submit, and ensure CTA flows emit analytics events for visit/submit/wait/cta/report share.
+2. [F-02/F-06.2/6] Enhance LLMOrchestrator to run 20 iterations per platform (40 total default), add retry/backoff/token bucket enforcement, extend llm_logs retention metadata, and expose cache/degraded information back to engine with coverage flags.
+3. [F-02/F-03] Update engine metrics builder to assume per-platform totals (SOV denominator 20), ensure snapshots refresh every 5 iterations, and include console log text samples; adjust conversion/advice logic alignment (# PRD: F-04/F-05).
+4. [F-05] Refactor advice builder to strictly follow three PRD bullet logics (low SOV, high negativity, competitor differentiation) with fallback placeholders.
+5. [E-01/E-02] Extend validation + orchestrator to detect sensitive words from both inputs and LLM outputs, raising correct message; ensure 3-strike degradation gracefully switches to industry estimation and logs grey note.
+6. [Analytics §5] Expand AnalyticsTracker usage plus frontend instrumentation to capture funnel (visit -> submit -> waiting -> CTA click) and exports for industry distribution/report share events; add tests verifying event sequences.
+7. [Testing] Add/extend pytest cases covering new advice strings, analytics emissions, sensitive-output blocking, retry/backoff behavior, frontend? (JS via snapshot) not testable; ensure pytest -q passes.

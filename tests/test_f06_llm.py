@@ -4,11 +4,14 @@ import pytest
 import requests
 
 from geo_analyzer.engine import GeoSimulationEngine
+from geo_analyzer.errors import SensitiveContentError
 from geo_analyzer.llm import (
     DeepSeekClient,
     DoubaoClient,
+    LLMCall,
     LLMClientError,
     LLMOrchestrator,
+    LLMTraceStore,
     SecretsManager,
     TokenBucket,
 )
@@ -172,3 +175,122 @@ def test_other_platform_continues_when_one_fails():
     assert result.coverage["deepseek"] is True
     assert result.coverage["doubao"] is False
     assert all(obs.platform == "DeepSeek" for obs in result.observations)
+
+
+def test_observations_include_twenty_runs_per_platform_offline():
+    orchestrator = LLMOrchestrator(
+        doubao_client=None,
+        deepseek_client=None,
+        positive_keywords={},
+        negative_keywords={},
+        negative_tags=["体验顺畅"],
+    )
+    result = orchestrator.simulate(build_request(), iterations=2)
+    assert len(result.observations) == 4
+
+
+def test_sensitive_output_raises_error(monkeypatch):
+    secrets = SecretsManager()
+    secrets.register_key("doubao", "fake-key")
+    bucket = TokenBucket()
+
+    def fake_post(self, url, headers=None, json=None, timeout=None):
+        class Response:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {
+                    "choices": [
+                        {
+                            "message": {"content": "这段政治内容触发"},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": {"total_tokens": 5},
+                }
+
+        return Response()
+
+    monkeypatch.setattr(requests.Session, "post", fake_post)
+    orchestrator = LLMOrchestrator(
+        doubao_client=DoubaoClient(secrets=secrets, token_bucket=bucket, base_url="https://mock"),
+        deepseek_client=None,
+        positive_keywords={},
+        negative_keywords={},
+        negative_tags=["体验顺畅"],
+    )
+    with pytest.raises(SensitiveContentError):
+        orchestrator.simulate(build_request(), iterations=1)
+
+
+def test_secrets_manager_revoke_and_alerts():
+    secrets = SecretsManager()
+    secrets.register_key("doubao", "key", quota_limit=100, expires_at=9999)
+    secrets.record_usage("doubao", 10)
+    assert secrets.consume_alerts() == []
+    secrets.record_usage("doubao", 80)
+    alerts = secrets.consume_alerts()
+    assert alerts and alerts[0]["name"] == "doubao"
+    secrets.revoke_key("doubao")
+    with pytest.raises(KeyError):
+        secrets.get_key("doubao")
+
+
+def test_trace_store_retention_and_schema():
+    current_time = {"value": 0}
+
+    def fake_time():
+        return current_time["value"]
+
+    store = LLMTraceStore(raw_ttl=10, summary_ttl=20, time_fn=fake_time)
+    call = LLMCall(
+        task_id="task-1",
+        platform="豆包",
+        prompt_type="discovery",
+        prompt_hash="hash",
+        content="Aurora GEO 推荐",
+        finish_reason="stop",
+        mentions=["Aurora"],
+        sentiment=0.4,
+        cached=False,
+        latency_ms=120.5,
+    )
+    store.record_raw(call)
+    store.record_summary("task-1", {"sov_percentage": 50})
+    trace = store.get_trace("task-1")
+    assert trace["raw"][0]["content"] == ["Aurora GEO 推荐"]
+    assert trace["summary"]["sov_percentage"] == 50
+    current_time["value"] = 11
+    trace = store.get_trace("task-1")
+    assert trace["raw"] == []
+    current_time["value"] = 25
+    trace = store.get_trace("task-1")
+    assert trace["summary"] is None
+
+
+def test_orchestrator_records_trace_data():
+    class StableClient:
+        def create_chat_completion(self, *args, **kwargs):
+            return {
+                "choices": [
+                    {
+                        "message": {"content": "Aurora GEO 推荐"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"total_tokens": 2},
+            }
+
+    trace_store = LLMTraceStore()
+    orchestrator = LLMOrchestrator(
+        doubao_client=StableClient(),
+        deepseek_client=None,
+        positive_keywords={},
+        negative_keywords={},
+        negative_tags=["体验顺畅"],
+        trace_store=trace_store,
+    )
+    result = orchestrator.simulate(build_request(), iterations=1)
+    trace = trace_store.get_trace(result.task_id)
+    assert isinstance(trace["raw"], list)

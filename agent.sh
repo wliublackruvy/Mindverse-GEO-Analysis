@@ -2,7 +2,8 @@
 set -euo pipefail
 
 # =========================
-# PRD-first local agent (FINAL - EXECUTION MODE)
+# GEO-Analyzer: Sync-Type Agent (Strict Exit)
+# Acts as Source-of-Truth enforcer.
 # =========================
 
 PRD_PATH="PRD/product_prd.md"
@@ -28,64 +29,74 @@ self_check() {
 run_audit() {
   local tmp
   tmp="$(mktemp -t prd_audit.XXXXXX)"
-  info "Audit tmpfile: $tmp"
+  info "Running structural audit..."
   python "$AUDIT_SCRIPT" >"$tmp" 2>&1 || true
   printf "%s" "$tmp"
 }
 
-build_prompt_from_json() {
-  python - <<'PY'
+# --- 核心：动态 Prompt 生成器 (修复版) ---
+build_sync_prompt() {
+  local json_input="$1"
+  local mode="$2"
+
+  python -c "
 import json, sys
-try:
-    data = json.loads(sys.stdin.read())
-except json.JSONDecodeError:
-    data = {"missing": [], "partial": []}
 
-missing = data.get("missing", [])
+data = json.loads('''$json_input''')
+missing = data.get('missing', [])
+partial = data.get('partial', [])
+covered = data.get('covered', [])
+mode = '$mode'
 
-print(f"""
-You are the local dev agent.
-Current status: {len(missing)} MISSING items: {missing}.
+print(f'''
+You are the Lead Developer for GEO-Analyzer.
+Current Mode: {mode}
 
-FATAL ERROR IN PREVIOUS TURN: You generated a plan but DID NOT write any code.
-DO NOT GENERATE A PLAN.
-DO NOT SUMMARIZE.
-IMMEDIATELY GENERATE SHELL COMMANDS TO CREATE FILES.
+SOURCE OF TRUTH: PRD/product_prd.md
 
-YOUR TASK: Implement F-06 (Real Data) and E-01 (Fallback) NOW.
+STATUS:
+- MISSING: {missing}
+- PARTIAL: {partial}
+- COVERED: {covered}
 
-REQUIRED OPERATIONS (Perform these using `cat <<EOF` or `sed`):
-1. CREATE `src/geo_analyzer/llm.py`:
-   - Must contain `SecretsManager`, `TokenBucket`, `DoubaoClient`, `DeepSeekClient`.
-   - Must handle `POST /v1/chat/completions`.
-2. UPDATE `src/geo_analyzer/models.py`:
-   - Add `coverage` and `cache_note` fields to `SimulationMetrics`.
-3. UPDATE `src/geo_analyzer/engine.py`:
-   - Integrate `LLMOrchestrator`.
-   - Implement the 3-strike fallback logic (E-01).
-4. CREATE `tests/test_f06_llm.py`:
-   - Add `# PRD: F-06` tag.
-   - Test the clients and fallback logic.
+ANTI-LOOP RULES (CRITICAL):
+1. DO NOT OUTPUT A PLAN.
+2. DO NOT OUTPUT BULLET POINTS OF WHAT YOU \"WILL\" DO.
+3. DO NOT SUMMARIZE.
+4. ACTION ONLY.
 
-EXAMPLE OF WHAT YOU MUST DO RIGHT NOW:
-exec bash -c 'cat <<EOF > src/geo_analyzer/llm.py
-import os
-... code ...
-EOF'
+INSTRUCTIONS:
 
-START WRITING FILES NOW.
-""".strip())
-PY
+IF MODE == \"IMPLEMENT\":
+  - Fix MISSING/PARTIAL items immediately using \`exec bash -c 'cat <<EOF...'\`.
+
+IF MODE == \"VERIFY\":
+  - Your job is to READ the code (using \`cat\`) and CHECK if it matches PRD logic.
+  - IF CODE IS WRONG: Output shell commands to fix it immediately.
+  - IF CODE IS RIGHT: Output exactly the string \"NO_CHANGES_NEEDED\".
+
+You must choose ONE path:
+Path A: Write Code (if drift found)
+Path B: Output \"NO_CHANGES_NEEDED\" (if synced)
+
+If you verify and find no issues, you MUST say \"NO_CHANGES_NEEDED\" or the system will crash.
+
+ACT NOW.
+'''.strip())"
 }
 
 run_codex() {
   local prompt="$1"
-  info "Running codex exec"
-  printf "%s" "$prompt" | codex exec \
+  info "Thinking & Coding..."
+  
+  local output
+  output=$(printf "%s" "$prompt" | codex exec \
     -m "$CODEX_MODEL" \
     --sandbox "$CODEX_SANDBOX" \
     -C "$(pwd)" \
-    -
+    -)
+  
+  echo "$output"
 }
 
 main() {
@@ -100,36 +111,46 @@ main() {
   [[ -f "$PARSER_SCRIPT" ]] || die "Missing parser script: $PARSER_SCRIPT"
 
   info "PRD: $PRD_PATH"
-  info "Workdir: $(pwd)"
   info "Branch: $(git rev-parse --abbrev-ref HEAD)"
 
   for ((i=1;i<=MAX_LOOPS;i++)); do
-    info "Loop $i/$MAX_LOOPS - audit"
+    info "=== Loop $i/$MAX_LOOPS ==="
 
     audit_tmp="$(run_audit)"
     cat "$audit_tmp"
-
     json="$(cat "$audit_tmp" | python "$PARSER_SCRIPT")"
-    info "Parsed JSON: $json"
 
     missing_cnt="$(python -c 'import json,sys; obj=json.loads(sys.argv[1]); print(len(obj["missing"]))' "$json")"
     partial_cnt="$(python -c 'import json,sys; obj=json.loads(sys.argv[1]); print(len(obj["partial"]))' "$json")"
 
-    if [[ "$missing_cnt" -eq 0 && "$partial_cnt" -eq 0 ]]; then
-      info "Audit clean. Running pytest -q"
+    mode="VERIFY"
+    if [[ "$missing_cnt" -gt 0 || "$partial_cnt" -gt 0 ]]; then
+      mode="IMPLEMENT"
+    fi
+    
+    info "Current Mode: $mode"
+
+    prompt="$(build_sync_prompt "$json" "$mode")"
+    output="$(run_codex "$prompt")"
+    
+    # Check for Sync Completion
+    if [[ "$mode" == "VERIFY" ]] && echo "$output" | grep -q "NO_CHANGES_NEEDED"; then
+      info "✅ SYSTEM SYNCED. All code matches PRD logic."
+      info "Final sanity check..."
       pytest -q
-      info "DONE"
       exit 0
     fi
 
-    prompt="$(printf "%s" "$json" | build_prompt_from_json)"
-    run_codex "$prompt"
-
-    info "Running pytest -q"
-    pytest -q
+    info "Verifying changes with pytest..."
+    if ! pytest -q; then
+      info "⚠️ Tests failed. Agent will retry in next loop to fix them."
+    else
+      info "Tests passed. (Agent did not exit, retrying verify loop...)"
+    fi
+    
   done
 
-  die "MAX_LOOPS reached"
+  die "MAX_LOOPS reached without full sync."
 }
 
 main "$@"

@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from .analytics import AnalyticsTracker
 from .engine import GeoSimulationEngine
 from .errors import SensitiveContentError, ValidationError
 from .models import DiagnosticReport, DiagnosisRequest, Industry
@@ -21,6 +22,7 @@ app = FastAPI(
 )
 
 engine = GeoSimulationEngine()
+external_analytics = AnalyticsTracker()
 FRONTEND_DIR = Path(__file__).resolve().parent / "frontend"
 if FRONTEND_DIR.exists():
     app.mount(
@@ -70,12 +72,35 @@ class SimulationMetricsResponse(BaseModel):
 
 
 class DiagnosisResponse(BaseModel):
+    task_id: str
     benchmark_copy: str
     metrics: SimulationMetricsResponse
     conversion_card: ConversionCardResponse
     advices: List[AdviceResponse]
     logs: List[str]
     analytics: List[Dict[str, Any]]
+    report_version: int
+
+
+class AnalyticsEventPayload(BaseModel):
+    event: str
+    payload: Dict[str, Any] = Field(default_factory=dict)
+
+
+class RawTraceEntryResponse(BaseModel):
+    platform: str
+    prompt_type: str
+    content: List[str]
+    mentions: List[str]
+    sentiment: Dict[str, float]
+    latency_ms: float
+    recorded_at: float
+
+
+class LLMTraceResponse(BaseModel):
+    task_id: str
+    raw: List[RawTraceEntryResponse]
+    summary: Optional[Dict[str, Any]] = None
 
 
 @app.get("/health")
@@ -114,8 +139,24 @@ def create_diagnosis(payload: DiagnosisPayload) -> DiagnosisResponse:
     return _serialize_report(report)
 
 
+@app.post("/analytics/events")
+def ingest_analytics_event(event: AnalyticsEventPayload) -> Dict[str, str]:
+    # PRD: Analytics – capture CTA clicks / report share telemetry from前端.
+    external_analytics.track(event.event, event.payload)
+    return {"status": "accepted"}
+
+
+@app.get("/trace/{task_id}", response_model=LLMTraceResponse)
+def get_llm_trace(task_id: str) -> LLMTraceResponse:
+    trace = engine.orchestrator.trace_store.get_trace(task_id)
+    if not trace["raw"] and not trace["summary"]:
+        raise HTTPException(status_code=404, detail="trace not found")
+    return trace
+
+
 def _serialize_report(report: DiagnosticReport) -> DiagnosisResponse:
     return DiagnosisResponse(
+        task_id=report.task_id,
         benchmark_copy=report.benchmark_copy,
         metrics=SimulationMetricsResponse(
             sov_percentage=report.metrics.sov_percentage,
@@ -146,4 +187,5 @@ def _serialize_report(report: DiagnosticReport) -> DiagnosisResponse:
         advices=[AdviceResponse(text=advice.text) for advice in report.advices],
         logs=report.logs,
         analytics=report.analytics,
+        report_version=report.version,
     )

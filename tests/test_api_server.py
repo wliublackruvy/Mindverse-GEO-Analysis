@@ -30,9 +30,11 @@ def test_diagnosis_endpoint_returns_report(client):
     response = client.post("/diagnosis", json=build_payload())
     assert response.status_code == 200
     data = response.json()
+    assert "task_id" in data
     assert "metrics" in data
     assert data["conversion_card"]["mode"] in {"crisis", "growth", "defense"}
     assert len(data["advices"]) == 3
+    assert data["report_version"] >= 1
 
 
 def test_sensitive_payload_returns_400(client):
@@ -59,3 +61,22 @@ def test_frontend_index_served(client):
     response = client.get("/")
     assert response.status_code == 200
     assert "GEO 智能分析与诊断平台" in response.text
+
+
+def test_analytics_ingest_endpoint(client):
+    response = client.post(
+        "/analytics/events",
+        json={"event": "cta_clicked", "payload": {"mode": "crisis"}},
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "accepted"
+
+
+def test_trace_endpoint_returns_summary(client):
+    response = client.post("/diagnosis", json=build_payload())
+    task_id = response.json()["task_id"]
+    trace = client.get(f"/trace/{task_id}")
+    assert trace.status_code == 200
+    payload = trace.json()
+    assert payload["task_id"] == task_id
+    assert payload["summary"] is not None

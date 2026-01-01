@@ -34,6 +34,7 @@ def _default_coverage() -> Dict[str, bool]:
     return {"doubao": False, "deepseek": False}
 
 
+# PRD: E-02 – shared sensitive lexicon for both inputs and outputs.
 SENSITIVE_KEYWORDS = {
     "政治",
     "暴力",
@@ -42,6 +43,8 @@ SENSITIVE_KEYWORDS = {
     "weapon",
     "极端",
 }
+
+SENSITIVE_BLOCK_MESSAGE = "由于内容包含敏感词，无法在线生成。请联系人工顾问获取私密报告。"
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
@@ -55,6 +58,7 @@ class DiagnosisRequest:
     work_email: str
 
     def validate(self) -> None:
+        # PRD: F-01 – enforce required form inputs from diagnosis setup.
         if not self.company_name.strip():
             raise ValidationError("公司全称为必填项")
         if not self.product_name.strip():
@@ -64,10 +68,17 @@ class DiagnosisRequest:
             raise ValidationError("产品描述至少需要 10 个字符")
         if not EMAIL_RE.match(self.work_email.strip()):
             raise ValidationError("请输入有效的工作邮箱")
-        if self._contains_sensitive(description):
-            raise SensitiveContentError(
-                "检测到敏感词，无法在线生成，请联系人工顾问获取私密报告"
-            )
+        # PRD: E-02 – block any input field that carries敏感词.
+        combined_text = " ".join(
+            [
+                self.company_name,
+                self.product_name,
+                description,
+                self.work_email,
+            ]
+        )
+        if self._contains_sensitive(combined_text):
+            raise SensitiveContentError(SENSITIVE_BLOCK_MESSAGE)
 
     def _contains_sensitive(self, text: str) -> bool:
         normalized = self._normalized_text(text)
@@ -128,9 +139,11 @@ class AdviceItem:
 @dataclass
 class DiagnosticReport:
     request: DiagnosisRequest
+    task_id: str
     benchmark_copy: str
     metrics: SimulationMetrics
     conversion_card: ConversionCard
     advices: List[AdviceItem]
     logs: List[str]
     analytics: List[Dict[str, str]]
+    version: int

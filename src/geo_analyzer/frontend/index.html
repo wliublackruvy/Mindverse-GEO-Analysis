@@ -50,6 +50,9 @@
           <button type="submit" id="submit-btn">开始诊断</button>
         </form>
         <p id="form-status" class="status"></p>
+        <p id="realtime-tip" class="tip hidden">
+          诊断结果来自豆包 &amp; DeepSeek 实时调用，所有数据均已脱敏处理。
+        </p>
       </section>
 
       <section class="progress-section hidden" id="progress-section">
@@ -70,8 +73,28 @@
         <div class="metrics" id="metrics"></div>
         <div class="advices" id="advices"></div>
         <div class="analytics" id="analytics"></div>
+        <button type="button" id="download-report" class="secondary-btn hidden">
+          下载 PDF 报告 (Beta)
+        </button>
+      </section>
+
+      <section class="trace-section hidden" id="trace-section">
+        <h2>LLM Trace</h2>
+        <pre class="trace-window" id="trace-window"></pre>
       </section>
     </main>
+    <div class="modal-overlay hidden" id="sensitive-modal">
+      <div class="modal-content">
+        <h3>实时诊断暂无法生成</h3>
+        <p>由于内容包含敏感词，无法在线生成。请联系人工顾问获取私密报告。</p>
+        <div class="modal-actions">
+          <button type="button" id="wechat-btn">加微信获取私密报告</button>
+          <button type="button" class="secondary-btn" id="close-modal">
+            稍后再试
+          </button>
+        </div>
+      </div>
+    </div>
     <script src="/static/app.js" type="module"></script>
   </body>
 </html>
