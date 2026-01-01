@@ -1,50 +1,151 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# =========================
-# Local Agent Runner (Codex)
-# - PRD is source of truth
-# - Python stack, pytest only
-# - Enforces: read PRD -> plan -> implement -> pytest loop -> PRD Trace
-# =========================
-
+# PRD-first agent (ASCII-only)
 PRD_PATH="PRD/product_prd.md"
+AGENTS_PATH="AGENTS.md"
+AUDIT_SCRIPT="tools/prd_audit.py"
 
-# Optional: ensure we're in a git repo (non-fatal)
-if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  IN_GIT_REPO=true
-else
-  IN_GIT_REPO=false
-fi
+CODEX_MODEL="${CODEX_MODEL:-gpt-5-codex}"
+CODEX_SANDBOX="${CODEX_SANDBOX:-workspace-write}"
+MAX_LOOPS="${MAX_LOOPS:-30}"
 
-# 1) Ensure PRD exists
-if [ ! -f "$PRD_PATH" ]; then
-  echo "❌ PRD not found: $PRD_PATH"
-  echo "   Expected path: $PRD_PATH"
-  exit 1
-fi
+die() { echo "ERROR: $*" >&2; exit 1; }
+info() { echo "INFO: $*"; }
 
-# 2) Optional: work on a new branch each run (safe default)
-if [ "$IN_GIT_REPO" = true ]; then
-  BRANCH="agent/$(date +%Y%m%d-%H%M%S)"
-  # If already on a detached head or branch creation fails, continue anyway
-  git checkout -b "$BRANCH" >/dev/null 2>&1 || true
-  echo "🌿 Working on branch: $(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "$BRANCH")"
-fi
+need() { command -v "$1" >/dev/null 2>&1 || die "Missing command: $1"; }
 
-# 3) Helpful preflight info (non-fatal)
-echo "📄 PRD: $PRD_PATH"
-echo "🧪 Test: pytest (configured by pytest.ini if present)"
-[ -f "pytest.ini" ] && echo "✅ Found pytest.ini (project test conventions will apply)" || echo "⚠️  No pytest.ini found (recommended to add one)"
+self_check() {
+  # Fail if file contains Unicode replacement character (EF BF BD)
+  if LC_ALL=C grep -n $'\xEF\xBF\xBD' "$0" >/dev/null 2>&1; then
+    die "agent.sh contains Unicode replacement character. Recreate with: cat <<'EOF' > agent.sh"
+  fi
+}
 
-# 4) Run Codex with a strict, repeatable instruction set
-PROMPT=$'你是本项目的本地开发代理（Python 项目）。必须严格遵守仓库根目录的 AGENTS.md。\nPRD 是唯一真相（source of truth）：PRD/product_prd.md\n\n【硬性流程（必须按顺序执行）】\n1) 打开并完整阅读 PRD/product_prd.md（不要跳过）。\n2) 输出三部分（必须引用 PRD 的 REQ 编号或小节标题）：\n   A. 需求清单与验收标准（按 REQ-XXX 逐条列出，含关键边界条件）\n   B. in-scope / out-of-scope（明确哪些做、哪些不做）\n   C. 实施计划（分步骤，每一步都引用对应的 REQ-XXX 或 PRD 小节）\n3) 开始修改代码实现 in-scope 的需求：\n   - 每完成一个小步（或每个 REQ），都运行：pytest\n     * pytest 的默认行为由 pytest.ini（如果存在）定义，必须遵守\n     * 不要随意追加 pytest 参数，除非明确需要定位问题（定位完成后回到 `pytest`）\n   - 如果 pytest 失败：分析失败原因 -> 修复 -> 再跑 pytest，直到通过\n   - 如果 PRD 的 REQ-XXX 没有可验证的测试：补 pytest 测试覆盖验收标准\n   - 测试命名建议：test_req_xxx_*，并在测试函数/注释里标注对应 REQ-XXX\n4) 遇到 PRD 含糊/矛盾/缺少关键数据：立刻提出具体问题并停止猜测实现\n5) 最终输出：PRD Trace（REQ-XXX -> 修改文件 -> pytest 测试函数名）+ 如何运行测试（pytest）\n\n【重要约束】\n- 任何实现决策必须可追溯到 PRD（REQ-XXX 或小节标题）。\n- PRD 与现有代码行为冲突时，以 PRD 为准。\n- 只使用 pytest 作为测试框架。\n'
+# Run audit and preserve exit code.
+# Prints audit output to stdout, and returns audit exit code.
+run_audit() {
+  set +e
+  local out
+  out="$(python "$AUDIT_SCRIPT" 2>&1)"
+  local rc=$?
+  set -e
+  printf "%s\n" "$out"
+  return $rc
+}
 
-# 非交互脚本化执行（推荐）
-codex exec "$PROMPT"
+build_prompt() {
+  local audit_text="$1"
+  local loop_id="$2"
 
+  python - <<PY
+prd_path = "${PRD_PATH}"
+audit_text = """${audit_text}""".strip()
+loop_id = "${loop_id}"
 
-echo "✅ Done. Review changes and run pytest locally if needed."
-if [ "$IN_GIT_REPO" = true ]; then
-  echo "🔎 Tip: use 'git status' and 'git diff' to review. Commit when satisfied."
-fi
+print(f"""You are a local dev agent for this Python repo. You MUST follow AGENTS.md in the repo root.
+The ONLY source of truth is PRD: {prd_path}
+
+MODE:
+- Ignore PRD diff entirely.
+- Always read the PRD fully each run.
+- If ANY requirement is PARTIAL or MISSING, implement it and add pytest evidence.
+- Frontend files under src/geo_analyzer/frontend count as implementation, BUT you still MUST add pytest evidence (API/engine fields/tests asserting UI copy/etc).
+- Add explicit PRD tags in code/tests: '# PRD: F-06', '# PRD: E-01', '# PRD: Analytics' (and so on).
+
+HARD PROCESS (in order):
+1) Open and fully read PRD/product_prd.md (do not skip).
+2) Output three parts (reference ONLY real IDs in PRD: F-01..F-06, E-01..E-02, Analytics):
+   A) requirements + acceptance criteria (include key boundaries)
+   B) in-scope / out-of-scope
+   C) step-by-step plan referencing PRD IDs
+3) Implement in-scope items:
+   - after each small step run: pytest -q
+   - if pytest fails: fix and rerun until passing
+   - if a PRD item has no test evidence: add pytest tests
+4) Final output: PRD Trace (ID -> changed files -> pytest test function names) + how to run tests (pytest -q)
+
+IMPORTANT:
+- You MUST make real changes in src/ and/or tests/ (and frontend is allowed but still needs pytest evidence).
+- Avoid unrelated refactors or feature expansions.
+- If PRD is ambiguous or missing key data: ask specific questions and STOP (do not guess).
+
+AUDIT OUTPUT (input):
+{audit_text}
+
+Loop marker: {loop_id}
+""")
+PY
+}
+
+run_codex() {
+  local prompt="$1"
+  # COMMAND must be one argument. The agent will still execute its own commands.
+  codex exec \
+    -m "$CODEX_MODEL" \
+    --sandbox "$CODEX_SANDBOX" \
+    -C "$(pwd)" \
+    "$prompt" \
+    "bash -lc true"
+}
+
+has_code_changes() {
+  # Require real changes in src/ or tests/ (frontend counts because it's under src/)
+  local changed
+  changed="$(git diff --name-only)"
+  if echo "$changed" | grep -Eq '^(src/|tests/)'; then
+    return 0
+  fi
+  return 1
+}
+
+main() {
+  self_check
+  need git
+  need python
+  need codex
+
+  [[ -f "$PRD_PATH" ]] || die "Missing PRD: $PRD_PATH"
+  [[ -f "$AGENTS_PATH" ]] || die "Missing AGENTS.md"
+  [[ -f "$AUDIT_SCRIPT" ]] || die "Missing audit script: $AUDIT_SCRIPT"
+  [[ -f pytest.ini ]] || info "pytest.ini not found (ok if project does not use it)"
+
+  info "PRD: $PRD_PATH"
+  info "Workdir: $(pwd)"
+  info "Branch: $(git rev-parse --abbrev-ref HEAD)"
+
+  for ((i=1;i<=MAX_LOOPS;i++)); do
+    info "Loop $i/$MAX_LOOPS - audit"
+    audit_text="$(run_audit)"
+    audit_rc=$?
+    echo "$audit_text"
+
+    if [[ $audit_rc -eq 0 ]]; then
+      info "Audit clean. Running pytest -q"
+      pytest -q
+      info "DONE: audit clean and tests passing"
+      exit 0
+    fi
+
+    # Not clean -> run codex to implement missing/partial
+    prompt="$(build_prompt "$audit_text" "$i")"
+    run_codex "$prompt"
+
+    info "Running pytest -q"
+    pytest -q
+
+    # Enforce real code/test/frontend change
+    if ! has_code_changes; then
+      info "No src/tests changes detected after codex run. Strengthening and retrying same loop..."
+      # Add a harder instruction by re-running codex once immediately.
+      prompt="$(build_prompt "$audit_text" "${i}-retry")"
+      run_codex "$prompt"
+      info "Running pytest -q (after retry)"
+      pytest -q
+    fi
+  done
+
+  die "MAX_LOOPS reached without clean audit"
+}
+
+main "$@"
