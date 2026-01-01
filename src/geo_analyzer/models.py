@@ -30,6 +30,10 @@ class Industry(str, Enum):
         return self.value
 
 
+def _default_coverage() -> Dict[str, bool]:
+    return {"doubao": False, "deepseek": False}
+
+
 SENSITIVE_KEYWORDS = {
     "政治",
     "暴力",
@@ -100,6 +104,8 @@ class SimulationMetrics:
     negative_rate: float
     negative_tags: List[str]
     competitors: Dict[str, int]
+    coverage: Dict[str, bool] = field(default_factory=_default_coverage)
+    cache_note: Optional[str] = None
     degraded: bool = False
     estimation_note: Optional[str] = None
     snapshots: List[SimulationSnapshot] = field(default_factory=list)

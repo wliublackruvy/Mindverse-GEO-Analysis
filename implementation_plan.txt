@@ -1,0 +1,19 @@
+Scope (PRD 3. Detailed Functional Requirements):
+- In: F-06 Doubao & DeepSeek real API integration within backend engine; E-01 API timeout/3-strike fallback industry estimation.
+- Out: UI messaging, analytics, offline cache UI prompts not involving backend LLM orchestrator.
+
+Acceptance Criteria:
+1. F-06 §3: Secrets Manager for API keys; POST /v1/chat/completions support for Doubao (doubao-pro) and DeepSeek (deepseek-chat) with schema {platform,prompt_type,content[],mentions[],sentiment.score}, rate-limit via TokenBucket (60 RPM), log responses per task, coverage metrics, fallback to cache when available.
+2. E-01 §4: If a platform hits 3 consecutive failures, halt calls for that platform, mark coverage accordingly, switch engine outputs to industry estimation data without surfacing errors.
+
+Constraints:
+- LLM clients must capture usage quota & expiry metadata (F-06.1).
+- Each task_id orchestrates Doubao+DeepSeek concurrently with task_queue (F-06.2).
+- Responses must be parsed to unified schema and stored with algorithm version (F-06.3-4).
+- Must support 24h cache fallback note tagging (F-06.6) and UI grey note.
+
+Implementation Plan (aligned to PRD sections):
+1. (F-06.1/2) Implement src/geo_analyzer/llm.py with SecretsManager, TokenBucket, DoubaoClient, DeepSeekClient wrapping POST /v1/chat/completions, enforce rate limiting, retries, metadata capture, cache hooks.
+2. (F-06.3/4) Extend models.SimulationMetrics with coverage and cache_note to track per-platform success + cache usage; ensure schema accommodates mentions/sentiment fields.
+3. (F-06.2/6 & E-01) Update engine.py: integrate LLMOrchestrator to coordinate Doubao/DeepSeek calls per task_id, stream into llm_logs, and implement 3-strike fallback (stop platform, use cache/industry estimation, mark coverage & cache_note) without user-facing errors.
+4. (F-06/E-01) Add tests/test_f06_llm.py covering SecretsManager loading, TokenBucket throttling, Doubao/DeepSeek request building, fallback triggers, and cache note propagation with PRD tag.

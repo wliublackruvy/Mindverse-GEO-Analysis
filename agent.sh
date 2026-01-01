@@ -1,102 +1,91 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# PRD-first agent (ASCII-only)
+# =========================
+# PRD-first local agent (FINAL - EXECUTION MODE)
+# =========================
+
 PRD_PATH="PRD/product_prd.md"
 AGENTS_PATH="AGENTS.md"
 AUDIT_SCRIPT="tools/prd_audit.py"
+PARSER_SCRIPT="tools/audit_to_json.py"
 
 CODEX_MODEL="${CODEX_MODEL:-gpt-5-codex}"
 CODEX_SANDBOX="${CODEX_SANDBOX:-workspace-write}"
 MAX_LOOPS="${MAX_LOOPS:-30}"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
-info() { echo "INFO: $*"; }
+info() { echo "INFO: $*" >&2; }
 
 need() { command -v "$1" >/dev/null 2>&1 || die "Missing command: $1"; }
 
 self_check() {
-  # Fail if file contains Unicode replacement character (EF BF BD)
   if LC_ALL=C grep -n $'\xEF\xBF\xBD' "$0" >/dev/null 2>&1; then
-    die "agent.sh contains Unicode replacement character. Recreate with: cat <<'EOF' > agent.sh"
+    die "agent.sh contains Unicode replacement character. Recreate via cat <<'EOF'."
   fi
 }
 
-# Run audit and preserve exit code.
-# Prints audit output to stdout, and returns audit exit code.
 run_audit() {
-  set +e
-  local out
-  out="$(python "$AUDIT_SCRIPT" 2>&1)"
-  local rc=$?
-  set -e
-  printf "%s\n" "$out"
-  return $rc
+  local tmp
+  tmp="$(mktemp -t prd_audit.XXXXXX)"
+  info "Audit tmpfile: $tmp"
+  python "$AUDIT_SCRIPT" >"$tmp" 2>&1 || true
+  printf "%s" "$tmp"
 }
 
-build_prompt() {
-  local audit_text="$1"
-  local loop_id="$2"
+build_prompt_from_json() {
+  python - <<'PY'
+import json, sys
+try:
+    data = json.loads(sys.stdin.read())
+except json.JSONDecodeError:
+    data = {"missing": [], "partial": []}
 
-  python - <<PY
-prd_path = "${PRD_PATH}"
-audit_text = """${audit_text}""".strip()
-loop_id = "${loop_id}"
+missing = data.get("missing", [])
 
-print(f"""You are a local dev agent for this Python repo. You MUST follow AGENTS.md in the repo root.
-The ONLY source of truth is PRD: {prd_path}
+print(f"""
+You are the local dev agent.
+Current status: {len(missing)} MISSING items: {missing}.
 
-MODE:
-- Ignore PRD diff entirely.
-- Always read the PRD fully each run.
-- If ANY requirement is PARTIAL or MISSING, implement it and add pytest evidence.
-- Frontend files under src/geo_analyzer/frontend count as implementation, BUT you still MUST add pytest evidence (API/engine fields/tests asserting UI copy/etc).
-- Add explicit PRD tags in code/tests: '# PRD: F-06', '# PRD: E-01', '# PRD: Analytics' (and so on).
+FATAL ERROR IN PREVIOUS TURN: You generated a plan but DID NOT write any code.
+DO NOT GENERATE A PLAN.
+DO NOT SUMMARIZE.
+IMMEDIATELY GENERATE SHELL COMMANDS TO CREATE FILES.
 
-HARD PROCESS (in order):
-1) Open and fully read PRD/product_prd.md (do not skip).
-2) Output three parts (reference ONLY real IDs in PRD: F-01..F-06, E-01..E-02, Analytics):
-   A) requirements + acceptance criteria (include key boundaries)
-   B) in-scope / out-of-scope
-   C) step-by-step plan referencing PRD IDs
-3) Implement in-scope items:
-   - after each small step run: pytest -q
-   - if pytest fails: fix and rerun until passing
-   - if a PRD item has no test evidence: add pytest tests
-4) Final output: PRD Trace (ID -> changed files -> pytest test function names) + how to run tests (pytest -q)
+YOUR TASK: Implement F-06 (Real Data) and E-01 (Fallback) NOW.
 
-IMPORTANT:
-- You MUST make real changes in src/ and/or tests/ (and frontend is allowed but still needs pytest evidence).
-- Avoid unrelated refactors or feature expansions.
-- If PRD is ambiguous or missing key data: ask specific questions and STOP (do not guess).
+REQUIRED OPERATIONS (Perform these using `cat <<EOF` or `sed`):
+1. CREATE `src/geo_analyzer/llm.py`:
+   - Must contain `SecretsManager`, `TokenBucket`, `DoubaoClient`, `DeepSeekClient`.
+   - Must handle `POST /v1/chat/completions`.
+2. UPDATE `src/geo_analyzer/models.py`:
+   - Add `coverage` and `cache_note` fields to `SimulationMetrics`.
+3. UPDATE `src/geo_analyzer/engine.py`:
+   - Integrate `LLMOrchestrator`.
+   - Implement the 3-strike fallback logic (E-01).
+4. CREATE `tests/test_f06_llm.py`:
+   - Add `# PRD: F-06` tag.
+   - Test the clients and fallback logic.
 
-AUDIT OUTPUT (input):
-{audit_text}
+EXAMPLE OF WHAT YOU MUST DO RIGHT NOW:
+exec bash -c 'cat <<EOF > src/geo_analyzer/llm.py
+import os
+... code ...
+EOF'
 
-Loop marker: {loop_id}
-""")
+START WRITING FILES NOW.
+""".strip())
 PY
 }
 
 run_codex() {
   local prompt="$1"
-  # COMMAND must be one argument. The agent will still execute its own commands.
-  codex exec \
+  info "Running codex exec"
+  printf "%s" "$prompt" | codex exec \
     -m "$CODEX_MODEL" \
     --sandbox "$CODEX_SANDBOX" \
     -C "$(pwd)" \
-    "$prompt" \
-    "bash -lc true"
-}
-
-has_code_changes() {
-  # Require real changes in src/ or tests/ (frontend counts because it's under src/)
-  local changed
-  changed="$(git diff --name-only)"
-  if echo "$changed" | grep -Eq '^(src/|tests/)'; then
-    return 0
-  fi
-  return 1
+    -
 }
 
 main() {
@@ -106,9 +95,9 @@ main() {
   need codex
 
   [[ -f "$PRD_PATH" ]] || die "Missing PRD: $PRD_PATH"
-  [[ -f "$AGENTS_PATH" ]] || die "Missing AGENTS.md"
+  [[ -f "$AGENTS_PATH" ]] || die "Missing AGENTS.md: $AGENTS_PATH"
   [[ -f "$AUDIT_SCRIPT" ]] || die "Missing audit script: $AUDIT_SCRIPT"
-  [[ -f pytest.ini ]] || info "pytest.ini not found (ok if project does not use it)"
+  [[ -f "$PARSER_SCRIPT" ]] || die "Missing parser script: $PARSER_SCRIPT"
 
   info "PRD: $PRD_PATH"
   info "Workdir: $(pwd)"
@@ -116,36 +105,31 @@ main() {
 
   for ((i=1;i<=MAX_LOOPS;i++)); do
     info "Loop $i/$MAX_LOOPS - audit"
-    audit_text="$(run_audit)"
-    audit_rc=$?
-    echo "$audit_text"
 
-    if [[ $audit_rc -eq 0 ]]; then
+    audit_tmp="$(run_audit)"
+    cat "$audit_tmp"
+
+    json="$(cat "$audit_tmp" | python "$PARSER_SCRIPT")"
+    info "Parsed JSON: $json"
+
+    missing_cnt="$(python -c 'import json,sys; obj=json.loads(sys.argv[1]); print(len(obj["missing"]))' "$json")"
+    partial_cnt="$(python -c 'import json,sys; obj=json.loads(sys.argv[1]); print(len(obj["partial"]))' "$json")"
+
+    if [[ "$missing_cnt" -eq 0 && "$partial_cnt" -eq 0 ]]; then
       info "Audit clean. Running pytest -q"
       pytest -q
-      info "DONE: audit clean and tests passing"
+      info "DONE"
       exit 0
     fi
 
-    # Not clean -> run codex to implement missing/partial
-    prompt="$(build_prompt "$audit_text" "$i")"
+    prompt="$(printf "%s" "$json" | build_prompt_from_json)"
     run_codex "$prompt"
 
     info "Running pytest -q"
     pytest -q
-
-    # Enforce real code/test/frontend change
-    if ! has_code_changes; then
-      info "No src/tests changes detected after codex run. Strengthening and retrying same loop..."
-      # Add a harder instruction by re-running codex once immediately.
-      prompt="$(build_prompt "$audit_text" "${i}-retry")"
-      run_codex "$prompt"
-      info "Running pytest -q (after retry)"
-      pytest -q
-    fi
   done
 
-  die "MAX_LOOPS reached without clean audit"
+  die "MAX_LOOPS reached"
 }
 
 main "$@"

@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import math
 import re
-from dataclasses import dataclass
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from .analytics import AnalyticsTracker
+from .llm import LLMObservation, LLMOrchestrator
 from .logger import ProcessLogger
 from .models import (
     AdviceItem,
@@ -19,7 +18,7 @@ from .models import (
 
 
 class GeoSimulationEngine:
-    """High-level orchestrator that fulfills sections F-01 through F-05."""
+    """High-level orchestrator fulfilling PRD F-01 ~ F-06 + E-01."""
 
     _DEGRADE_KEYWORDS = {"timeout", "熔断", "degrade"}
     _NEGATIVE_KEYWORDS = {
@@ -59,10 +58,17 @@ class GeoSimulationEngine:
         iterations: int = 20,
         logger: ProcessLogger | None = None,
         tracker: AnalyticsTracker | None = None,
+        orchestrator: LLMOrchestrator | None = None,
     ) -> None:
         self.iterations = iterations
         self.logger = logger or ProcessLogger()
         self.tracker = tracker or AnalyticsTracker()
+        self.orchestrator = orchestrator or LLMOrchestrator(
+            industry_competitors=self._INDUSTRY_COMPETITORS,
+            positive_keywords=self._POSITIVE_KEYWORDS,
+            negative_keywords=self._NEGATIVE_KEYWORDS,
+            negative_tags=self._NEGATIVE_TAG_PHRASES,
+        )
 
     def run(self, request: DiagnosisRequest) -> DiagnosticReport:
         request.validate()
@@ -118,7 +124,13 @@ class GeoSimulationEngine:
         text = request.normalized_full_text()
         return any(keyword in text for keyword in self._DEGRADE_KEYWORDS)
 
-    def _generate_industry_estimation(self, request: DiagnosisRequest) -> SimulationMetrics:
+    def _generate_industry_estimation(
+        self,
+        request: DiagnosisRequest,
+        *,
+        coverage: Optional[Dict[str, bool]] = None,
+        cache_note: Optional[str] = None,
+    ) -> SimulationMetrics:
         self.logger.log(
             "System",
             "API 超时，触发静默降级，使用行业通用估算模型",
@@ -140,85 +152,88 @@ class GeoSimulationEngine:
             negative_rate=negative_rate,
             negative_tags=["Based on Industry Estimation"],
             competitors={},
+            coverage=coverage or {"doubao": False, "deepseek": False},
+            cache_note=cache_note,
             degraded=True,
             estimation_note="Based on Industry Estimation",
             snapshots=snapshots,
         )
 
     def _run_simulation(self, request: DiagnosisRequest) -> SimulationMetrics:
-        base_strength = 0.45
-        normalized_description = request.product_description.lower()
-        for keyword, delta in self._POSITIVE_KEYWORDS.items():
-            if keyword in normalized_description:
-                base_strength += delta
-        for keyword, delta in self._NEGATIVE_KEYWORDS.items():
-            if keyword in normalized_description:
-                base_strength -= delta / 2
-        base_strength = max(0.05, min(0.95, base_strength))
-        recommended_runs = int(round(self.iterations * base_strength))
+        llm_result = self.orchestrator.simulate(request, iterations=self.iterations)
+        self.logger.log("System", f"实时任务 {llm_result.task_id} 已创建")
+        for platform, covered in llm_result.coverage.items():
+            state = "在线" if covered else "不可用"
+            self.logger.log("System", f"{platform} 覆盖状态: {state}")
+        if llm_result.cache_note:
+            self.logger.log("System", llm_result.cache_note)
+        if llm_result.degraded or not llm_result.observations:
+            self.logger.log(
+                "System",
+                "LLM 实时接口连续失败，触发 E-01 行业估算",
+            )
+            return self._generate_industry_estimation(
+                request,
+                coverage=llm_result.coverage,
+                cache_note=llm_result.cache_note,
+            )
+        metrics = self._build_metrics_from_observations(llm_result.observations, request)
+        metrics.coverage = llm_result.coverage
+        metrics.cache_note = llm_result.cache_note
+        return metrics
 
-        negative_ratio = 0.1
-        for keyword, delta in self._NEGATIVE_KEYWORDS.items():
-            if keyword in normalized_description:
-                negative_ratio += delta
-        negative_ratio = min(0.9, max(0.0, negative_ratio))
-        negative_runs = int(round(self.iterations * negative_ratio))
-
-        competitors = self._extract_competitors(request)
-        competitor_counts: Dict[str, int] = {name: 0 for name in competitors}
+    def _build_metrics_from_observations(
+        self, observations: List[LLMObservation], request: DiagnosisRequest
+    ) -> SimulationMetrics:
+        competitor_counts: Dict[str, int] = {}
         negative_tags: List[str] = []
         snapshots: List[SimulationSnapshot] = []
         recommendation_count = 0
         negative_count = 0
 
-        for iteration in range(self.iterations):
-            provider = "DeepSeek" if iteration % 2 else "豆包"
+        for idx, observation in enumerate(observations):
+            provider = observation.platform
+            status = "Cache" if observation.cached else "Success"
             self.logger.log(
                 "System",
-                f"正在连接 {provider} 知识库... Success",
+                f"正在连接 {provider} 知识库... {status}",
             )
-            if iteration < recommended_runs:
+            if observation.recommended:
                 recommendation_count += 1
                 self.logger.log(
                     "Engine",
                     f"{provider} 推荐 {request.product_name}",
                 )
             else:
-                competitor = (
-                    competitors[iteration % len(competitors)]
-                    if competitors
-                    else "其他竞品"
-                )
-                competitor_counts[competitor] = competitor_counts.get(competitor, 0) + 1
-                self.logger.log(
-                    "Engine",
-                    f"{provider} 更倾向 {competitor}",
-                )
-
-            if iteration < negative_runs:
+                competitor = observation.competitor or self._fallback_competitor(request)
+                if competitor:
+                    competitor_counts[competitor] = competitor_counts.get(competitor, 0) + 1
+                    self.logger.log(
+                        "Engine",
+                        f"{provider} 更倾向 {competitor}",
+                    )
+            if observation.sentiment < 0:
                 negative_count += 1
-                tag = self._NEGATIVE_TAG_PHRASES[iteration % len(self._NEGATIVE_TAG_PHRASES)]
-                negative_tags.append(tag)
-            else:
-                tag = "体验顺畅"
+            tag = observation.tag or "体验顺畅"
+            negative_tags.append(tag)
             self.logger.log(
                 "Analysis",
-                f"监测到关键词: \"{tag}\"",
+                f'监测到关键词: "{tag}"',
             )
-
-            if (iteration + 1) % 5 == 0:
-                sov_progress = (recommendation_count / (iteration + 1)) * 100
-                negative_rate_progress = (negative_count / (iteration + 1)) * 100
+            if (idx + 1) % 5 == 0:
+                sov_progress = (recommendation_count / (idx + 1)) * 100
+                negative_rate_progress = (negative_count / (idx + 1)) * 100
                 snapshots.append(
                     SimulationSnapshot(
-                        iteration=iteration + 1,
+                        iteration=idx + 1,
                         sov_progress=round(sov_progress, 2),
                         negative_rate=round(negative_rate_progress, 2),
                     )
                 )
 
-        sov_percentage = round((recommendation_count / self.iterations) * 100, 2)
-        negative_rate = round((negative_count / self.iterations) * 100, 2)
+        total_runs = max(1, len(observations))
+        sov_percentage = round((recommendation_count / total_runs) * 100, 2)
+        negative_rate = round((negative_count / total_runs) * 100, 2)
         return SimulationMetrics(
             sov_percentage=sov_percentage,
             recommendation_count=recommendation_count,
@@ -228,20 +243,20 @@ class GeoSimulationEngine:
             snapshots=snapshots,
         )
 
-    def _extract_competitors(self, request: DiagnosisRequest) -> List[str]:
+    def _fallback_competitor(self, request: DiagnosisRequest) -> Optional[str]:
         inline = re.findall(r"[A-Z][A-Za-z0-9\-]+", request.product_description)
-        candidates: List[str] = []
-        for candidate in inline:
-            if candidate.lower() not in {
-                request.company_name.lower(),
-                request.product_name.lower(),
-            }:
-                candidates.append(candidate)
-        candidates.extend(self._INDUSTRY_COMPETITORS.get(request.industry, []))
         deduped: Dict[str, None] = {}
-        for candidate in candidates:
+        for candidate in inline:
             deduped.setdefault(candidate, None)
-        return list(deduped.keys())
+        if deduped:
+            normalized_company = request.company_name.lower()
+            normalized_product = request.product_name.lower()
+            for candidate in deduped:
+                lowered = candidate.lower()
+                if lowered not in {normalized_company, normalized_product}:
+                    return candidate
+        industry_candidates = self._INDUSTRY_COMPETITORS.get(request.industry, [])
+        return industry_candidates[0] if industry_candidates else None
 
     def _build_conversion_card(
         self, metrics: SimulationMetrics, request: DiagnosisRequest

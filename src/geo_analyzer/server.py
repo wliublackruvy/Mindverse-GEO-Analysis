@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 
 from .engine import GeoSimulationEngine
 from .errors import SensitiveContentError, ValidationError
-from .models import AdviceItem, DiagnosticReport, DiagnosisRequest, Industry
+from .models import DiagnosticReport, DiagnosisRequest, Industry
 
 app = FastAPI(
     title="GEO Analyzer API",
@@ -62,6 +62,8 @@ class SimulationMetricsResponse(BaseModel):
     negative_rate: float
     negative_tags: List[str]
     competitors: Dict[str, int]
+    coverage: Dict[str, bool]
+    cache_note: Optional[str] = None
     degraded: bool = False
     estimation_note: Optional[str] = None
     snapshots: List[SimulationSnapshotResponse]
@@ -121,6 +123,8 @@ def _serialize_report(report: DiagnosticReport) -> DiagnosisResponse:
             negative_rate=report.metrics.negative_rate,
             negative_tags=report.metrics.negative_tags,
             competitors=report.metrics.competitors,
+            coverage=report.metrics.coverage,
+            cache_note=report.metrics.cache_note,
             degraded=report.metrics.degraded,
             estimation_note=report.metrics.estimation_note,
             snapshots=[
