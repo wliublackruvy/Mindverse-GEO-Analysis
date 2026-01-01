@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="zh">
+  <head>
+    <meta charset="UTF-8" />
+    <title>GEO 智能分析与诊断平台</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="container">
+      <section class="hero">
+        <h1>GEO 智能分析与诊断平台</h1>
+        <p>输入品牌信息，3-6 分钟内还原豆包 &amp; DeepSeek 的黑盒表现。</p>
+      </section>
+
+      <section class="form-section">
+        <form id="diagnosis-form">
+          <div class="field">
+            <label>公司全称 *</label>
+            <input type="text" name="company_name" required />
+          </div>
+          <div class="field">
+            <label>产品名称 *</label>
+            <input type="text" name="product_name" required />
+          </div>
+          <div class="field">
+            <label>产品描述 (≥10 字) *</label>
+            <textarea
+              name="product_description"
+              minlength="10"
+              rows="3"
+              required
+            ></textarea>
+          </div>
+          <div class="field">
+            <label>所属行业 *</label>
+            <select name="industry" id="industry" required>
+              <option value="">请选择</option>
+              <option value="SaaS">SaaS</option>
+              <option value="消费电子">消费电子</option>
+              <option value="金融">金融</option>
+              <option value="教育">教育</option>
+              <option value="其他">其他</option>
+            </select>
+            <p id="benchmark-copy" class="benchmark-copy"></p>
+          </div>
+          <div class="field">
+            <label>工作邮箱 *</label>
+            <input type="email" name="work_email" required />
+          </div>
+          <button type="submit" id="submit-btn">开始诊断</button>
+        </form>
+        <p id="form-status" class="status"></p>
+      </section>
+
+      <section class="progress-section hidden" id="progress-section">
+        <h2>模拟进度</h2>
+        <div class="progress-bar">
+          <div class="progress" id="progress-bar"></div>
+        </div>
+        <ul id="snapshot-list" class="snapshot-list"></ul>
+      </section>
+
+      <section class="logs-section hidden" id="logs-section">
+        <h2>动态日志窗</h2>
+        <div class="log-window" id="log-window"></div>
+      </section>
+
+      <section class="result-section hidden" id="result-section">
+        <div class="card" id="conversion-card"></div>
+        <div class="metrics" id="metrics"></div>
+        <div class="advices" id="advices"></div>
+        <div class="analytics" id="analytics"></div>
+      </section>
+    </main>
+    <script src="/static/app.js" type="module"></script>
+  </body>
+</html>

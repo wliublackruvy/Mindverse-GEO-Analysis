@@ -1,0 +1,159 @@
+:root {
+  font-family: "Inter", "PingFang SC", Arial, sans-serif;
+  background: #0b1221;
+  color: #f2f6ff;
+}
+
+body {
+  margin: 0;
+}
+
+.container {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 32px 16px 64px;
+}
+
+.hero {
+  margin-bottom: 32px;
+}
+
+.hero h1 {
+  font-size: 2rem;
+  margin-bottom: 8px;
+}
+
+.form-section,
+.progress-section,
+.logs-section,
+.result-section {
+  background: rgba(17, 34, 68, 0.8);
+  border-radius: 16px;
+  padding: 24px;
+  margin-bottom: 24px;
+  box-shadow: 0 20px 40px rgba(5, 10, 20, 0.4);
+}
+
+form .field {
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 16px;
+}
+
+label {
+  font-size: 0.95rem;
+  margin-bottom: 8px;
+}
+
+input,
+textarea,
+select {
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  padding: 12px;
+  font-size: 1rem;
+  background: rgba(8, 18, 40, 0.8);
+  color: #f2f6ff;
+}
+
+button {
+  border: none;
+  padding: 14px 20px;
+  border-radius: 10px;
+  background: linear-gradient(120deg, #5677ff, #8a6dff);
+  color: white;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.status {
+  min-height: 20px;
+  color: #83e2ff;
+}
+
+.benchmark-copy {
+  margin-top: 8px;
+  color: #a5b8ff;
+  font-size: 0.9rem;
+  font-style: italic;
+}
+
+.progress-bar {
+  height: 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.1);
+  overflow: hidden;
+  margin-bottom: 16px;
+}
+
+.progress {
+  height: 100%;
+  width: 0;
+  border-radius: 999px;
+  background: linear-gradient(120deg, #52e5ff, #4481eb);
+  transition: width 0.5s ease;
+}
+
+.snapshot-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.snapshot-list li {
+  padding: 8px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  font-size: 0.9rem;
+}
+
+.log-window {
+  background: rgba(0, 0, 0, 0.4);
+  border-radius: 10px;
+  padding: 16px;
+  min-height: 150px;
+  max-height: 240px;
+  overflow-y: auto;
+  font-family: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+  font-size: 0.85rem;
+}
+
+.card {
+  border-radius: 16px;
+  padding: 20px;
+  margin-bottom: 16px;
+}
+
+.card.crisis {
+  background: rgba(255, 80, 80, 0.15);
+  border: 1px solid rgba(255, 80, 80, 0.5);
+}
+
+.card.growth {
+  background: rgba(255, 170, 64, 0.15);
+  border: 1px solid rgba(255, 170, 64, 0.5);
+}
+
+.card.defense {
+  background: rgba(64, 160, 255, 0.15);
+  border: 1px solid rgba(64, 160, 255, 0.5);
+}
+
+.metrics,
+.advices,
+.analytics {
+  margin-bottom: 16px;
+}
+
+.advices ul,
+.analytics ul {
+  padding-left: 20px;
+}
+
+.hidden {
+  display: none;
+}
