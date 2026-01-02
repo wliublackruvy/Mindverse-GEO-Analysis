@@ -8,6 +8,8 @@ from fastapi.testclient import TestClient  # type: ignore  # noqa: E402
 from geo_analyzer.server import app
 from geo_analyzer.models import Industry
 
+pytestmark = pytest.mark.integration
+
 
 def build_payload(**overrides):
     payload = {

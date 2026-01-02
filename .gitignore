@@ -5,3 +5,8 @@ src/**/__pycache__/*
 __pycache__/
 *.py[cod]
 *.class
+
+# Coverage artifacts
+.coverage
+.coverage.*
+coverage*.xml

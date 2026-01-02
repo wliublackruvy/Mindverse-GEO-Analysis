@@ -17,6 +17,8 @@ from geo_analyzer.llm import (
 )
 from geo_analyzer.models import DiagnosisRequest, Industry
 
+pytestmark = pytest.mark.unit
+
 
 def build_request(**overrides):
     payload = {

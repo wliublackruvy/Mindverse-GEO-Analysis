@@ -198,6 +198,10 @@ button:disabled {
   z-index: 99;
 }
 
+.modal-overlay.hidden {
+  display: none;
+}
+
 .modal-content {
   background: #0f1a33;
   padding: 28px;

@@ -12,6 +12,8 @@ from geo_analyzer.logger import ProcessLogger
 from geo_analyzer.llm import LLMObservation, LLMRunResult
 from geo_analyzer.notifier import ReportUpdateNotifier
 
+pytestmark = pytest.mark.unit
+
 
 def build_request(**overrides):
     defaults = {
